@@ -1,5 +1,5 @@
-CREATE DATABASE IF NOT EXISTS family_game;
-USE family_game;
+CREATE DATABASE IF NOT EXISTS familygame;
+USE familygame;
 
 CREATE TABLE IF NOT EXISTS rooms (
   room_code     CHAR(4)       NOT NULL PRIMARY KEY,
