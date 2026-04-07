@@ -4,6 +4,7 @@ import { useGame } from '../context/GameContext';
 import socket from '../socket';
 
 const THEME_ICONS = { space: '🚀', jungle: '🌿', ocean: '🌊', castle: '🏰' };
+const VERSION = 'v1.0.1';
 
 export default function LandingPage() {
   const { state, dispatch } = useGame();
@@ -49,6 +50,7 @@ export default function LandingPage() {
         </div>
         <h1 className="title-gradient">Family Escape Rooms</h1>
         <p className="mt-2">Solve puzzles together on your iPads!</p>
+        <p style={{ fontSize: '0.75rem', color: 'var(--muted)', marginTop: 4 }}>{VERSION}</p>
       </div>
 
       {!mode && (
