@@ -7,10 +7,10 @@ module.exports = {
   space: [
     {
       id: 'space-final-001',
-      fragments: ['ALPHA', 'BRAVO', 'DELTA', 'ECHO'],
-      prompt: 'The launch code is your four NATO code words, in alphabetical order, separated by spaces.',
-      answer: 'ALPHA BRAVO DELTA ECHO',
-      normalizedAnswer: 'alphabravadeltaecho',
+      fragments: ['MARS', 'EARTH', 'SATURN', 'VENUS'],
+      prompt: 'The launch code is your four planets typed in alphabetical order, separated by spaces.',
+      answer: 'EARTH MARS SATURN VENUS',
+      normalizedAnswer: 'earthmarssaturnvenus',
     },
     {
       id: 'space-final-002',
