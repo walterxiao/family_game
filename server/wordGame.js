@@ -74,28 +74,10 @@ async function startWordGame(room) {
     player.turnPosition = turnOrder.indexOf(sid);
   }
 
-  // Persist game record
-  const [result] = await db.execute(
-    `INSERT INTO games (room_code, status, current_turn, tile_bag, board_state)
-     VALUES (?, 'active', 0, ?, '{}')`,
-    [room.roomCode, JSON.stringify(bag)]
-  );
-  const gameId = result.insertId;
-
-  for (const sid of turnOrder) {
-    const p = room.players[sid];
-    await db.execute(
-      `INSERT INTO game_players (game_id, player_id, turn_position, tile_rack, score)
-       VALUES (?, ?, ?, ?, 0)`,
-      [gameId, p.id, p.turnPosition, JSON.stringify(p.rack)]
-    );
-  }
-
-  await db.execute(`UPDATE rooms SET status='playing' WHERE room_code=?`, [room.roomCode]);
-
+  // Set up in-memory game state first — this always succeeds
   room.status = 'playing';
   room.game = {
-    gameId,
+    gameId: null,   // filled in if DB write succeeds
     turnOrder,
     currentTurnIndex: 0,
     moveNumber: 0,
@@ -103,6 +85,30 @@ async function startWordGame(room) {
     bag,
     consecutivePasses: 0,
   };
+
+  // Persist to DB (best-effort — game still runs in memory if tables don't exist yet)
+  try {
+    const [result] = await db.execute(
+      `INSERT INTO games (room_code, status, current_turn, tile_bag, board_state)
+       VALUES (?, 'active', 0, ?, '{}')`,
+      [room.roomCode, JSON.stringify(bag)]
+    );
+    room.game.gameId = result.insertId;
+
+    for (const sid of turnOrder) {
+      const p = room.players[sid];
+      await db.execute(
+        `INSERT INTO game_players (game_id, player_id, turn_position, tile_rack, score)
+         VALUES (?, ?, ?, ?, 0)`,
+        [room.game.gameId, p.id, p.turnPosition, JSON.stringify(p.rack)]
+      );
+    }
+
+    await db.execute(`UPDATE rooms SET status='playing' WHERE room_code=?`, [room.roomCode]);
+  } catch (dbErr) {
+    console.warn('[startWordGame] DB write failed (run migration?) —', dbErr.message);
+    console.warn('[startWordGame] Game continuing in memory only.');
+  }
 
   return room;
 }

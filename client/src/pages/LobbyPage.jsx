@@ -6,7 +6,7 @@ import socket from '../socket';
 export default function LobbyPage() {
   const { state } = useGame();
   const navigate = useNavigate();
-  const { roomCode, players, isHost } = state;
+  const { roomCode, players, isHost, error } = state;
 
   useEffect(() => {
     if (!roomCode) { navigate('/'); return; }
@@ -56,6 +56,17 @@ export default function LobbyPage() {
         {players.length < 2 && (
           <p className="text-muted mt-4" style={{ textAlign: 'center', fontSize: '0.9rem' }}>
             Waiting for at least 2 players to join…
+          </p>
+        )}
+
+        {error && (
+          <p style={{
+            color: '#ef9a9a', background: 'rgba(233,69,96,0.12)',
+            border: '1px solid rgba(233,69,96,0.3)',
+            borderRadius: 10, padding: '10px 14px',
+            fontSize: '0.9rem', marginTop: 16, fontWeight: 600,
+          }}>
+            ⚠️ {error}
           </p>
         )}
 
