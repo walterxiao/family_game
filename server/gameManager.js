@@ -353,6 +353,22 @@ function getPlayerList(room) {
   }));
 }
 
+function listRooms() {
+  const result = [];
+  for (const room of rooms.values()) {
+    if (room.status === 'lobby') {
+      const host = Object.values(room.players).find(p => p.role === 'host');
+      result.push({
+        roomCode: room.roomCode,
+        hostName: host?.name || 'Unknown',
+        playerCount: Object.keys(room.players).length,
+        totalRounds: room.totalRounds,
+      });
+    }
+  }
+  return result;
+}
+
 module.exports = {
   createRoom,
   joinRoom,
@@ -366,4 +382,5 @@ module.exports = {
   getRoom,
   getRoomBySocket,
   getPlayerList,
+  listRooms,
 };

@@ -11,6 +11,11 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
+// API: list open lobby rooms
+app.get('/api/rooms', (req, res) => {
+  res.json(gm.listRooms());
+});
+
 // Serve built React app
 const distPath = path.join(__dirname, '../client/dist');
 app.use(express.static(distPath));
