@@ -7,7 +7,7 @@ const pemPath = path.join(__dirname, '../global-bundle.pem');
 
 const sslConfig = fs.existsSync(pemPath)
   ? { ca: fs.readFileSync(pemPath) }
-  : true; // fallback: trust server cert without custom CA
+  : { rejectUnauthorized: true }; // fallback: validate using system CA bundle
 
 const pool = mysql.createPool({
   host: process.env.DB_HOST,
