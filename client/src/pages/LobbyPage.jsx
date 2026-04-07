@@ -13,7 +13,7 @@ export default function LobbyPage() {
   useEffect(() => {
     if (!roomCode) { navigate('/'); return; }
 
-    socket.on('game_started', () => navigate('/game'));
+    socket.on('game_started', () => navigate('/instructions'));
     return () => { socket.off('game_started'); };
   }, [roomCode, navigate]);
 
