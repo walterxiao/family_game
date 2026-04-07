@@ -5,191 +5,222 @@ const { Server } = require('socket.io');
 const path = require('path');
 const { networkInterfaces } = require('os');
 
-const gm = require('./gameManager');
+const gm  = require('./gameManager');
+const wg  = require('./wordGame');
+const { findHint } = require('./hintEngine');
 
-const app = express();
+const app    = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
+const io     = new Server(server, { cors: { origin: '*' } });
 
-// API: list open lobby rooms
-app.get('/api/rooms', (req, res) => {
-  res.json(gm.listRooms());
-});
+// ─── REST ─────────────────────────────────────────────────────────────────────
+
+app.get('/api/rooms', (_req, res) => res.json(gm.listRooms()));
 
 // Serve built React app
 const distPath = path.join(__dirname, '../client/dist');
 app.use(express.static(distPath));
-app.get('*', (req, res) => res.sendFile(path.join(distPath, 'index.html')));
+app.get('*', (_req, res) => res.sendFile(path.join(distPath, 'index.html')));
 
-// ─── Socket Events ───────────────────────────────────────────────────────────
+// ─── Socket Events ────────────────────────────────────────────────────────────
 
 io.on('connection', (socket) => {
   console.log(`[connect] ${socket.id}`);
 
-  // Create Room
-  socket.on('create_room', async ({ name, age, totalRounds } = {}) => {
+  // ── Lobby ──────────────────────────────────────────────────────────────────
+
+  socket.on('create_room', async ({ name, age } = {}) => {
     try {
-      const room = await gm.createRoom(socket.id, name, age, { totalRounds });
+      const room = await gm.createRoom(socket.id, name, age);
       socket.join(room.roomCode);
       socket.emit('room_created', {
         roomCode: room.roomCode,
         players: gm.getPlayerList(room),
-        totalRounds: room.totalRounds,
+        isHost: true,
       });
     } catch (err) {
       socket.emit('error', { code: 'CREATE_FAILED', message: err.message });
     }
   });
 
-  // Join Room
   socket.on('join_room', async ({ roomCode, name, age } = {}) => {
     try {
       const { room, player } = await gm.joinRoom(roomCode.toUpperCase(), socket.id, name, age);
-      socket.join(roomCode.toUpperCase());
-      socket.emit('room_joined', {
-        roomCode: room.roomCode,
-        players: gm.getPlayerList(room),
-        totalRounds: room.totalRounds,
-        isHost: false,
-      });
-      socket.to(room.roomCode).emit('player_joined', {
-        player: { socketId: player.socketId, name: player.name, age: player.age, tier: player.tier, role: player.role, status: player.status, score: 0 },
+      const rc = room.roomCode;
+      socket.join(rc);
+      socket.emit('room_joined', { roomCode: rc, players: gm.getPlayerList(room), isHost: false });
+      socket.to(rc).emit('player_joined', {
+        player: { socketId: player.socketId, name: player.name, age: player.age, role: player.role, status: player.status, score: 0, turnPosition: 0 },
       });
     } catch (err) {
       socket.emit('error', { code: 'JOIN_FAILED', message: err.message });
     }
   });
 
-  // Start Game (host only)
+  // ── Start Game ─────────────────────────────────────────────────────────────
+
   socket.on('start_game', async ({ roomCode } = {}) => {
     try {
-      const { room, roundState, puzzleAssignments, fragmentAssignments } = await gm.startGame(roomCode);
+      const room = gm.getRoom(roomCode);
+      if (!room)                   return socket.emit('error', { message: 'Room not found' });
+      if (room.hostId !== socket.id) return socket.emit('error', { message: 'Only the host can start the game' });
+      if (Object.keys(room.players).length < 2) return socket.emit('error', { message: 'Need at least 2 players to start' });
 
+      await wg.startWordGame(room);
+      const game = room.game;
+
+      // Broadcast game state (no racks — those are private)
       io.to(roomCode).emit('game_started', {
-        roundIndex: roundState.roundIndex,
-        theme: roundState.theme,
-        totalRounds: room.totalRounds,
+        board: game.board,
+        turnOrder: game.turnOrder,
+        currentTurnSocketId: game.turnOrder[game.currentTurnIndex],
+        players: gm.getPlayerList(room),
+        bagCount: game.bag.length,
       });
 
-      // Send each player their puzzle (fragment revealed only after solve)
-      for (const [socketId, puzzle] of Object.entries(puzzleAssignments)) {
-        io.to(socketId).emit('puzzle_assigned', { puzzle: sanitizePuzzle(puzzle) });
+      // Send each player their private rack
+      for (const sid of game.turnOrder) {
+        io.to(sid).emit('rack_dealt', { rack: room.players[sid].rack });
       }
     } catch (err) {
       socket.emit('error', { code: 'START_FAILED', message: err.message });
     }
   });
 
-  // Submit Answer
-  socket.on('submit_answer', async ({ roomCode, answer } = {}) => {
-    try {
-      const result = await gm.submitAnswer(roomCode, socket.id, answer);
-      if (!result.correct) {
-        socket.emit('answer_result', { correct: false });
-        return;
-      }
+  // ── Place Tiles ────────────────────────────────────────────────────────────
 
-      socket.emit('answer_result', { correct: true });
-      socket.emit('fragment_revealed', { fragment: result.fragment });
-
-      io.to(roomCode).emit('puzzle_solved', {
-        socketId: socket.id,
-        solvedCount: result.solvedCount,
-        totalPlayers: result.totalPlayers,
-      });
-
-      if (result.allSolved) {
-        io.to(roomCode).emit('final_puzzle_ready', {
-          prompt: result.finalPuzzle.prompt,
-        });
-      }
-    } catch (err) {
-      socket.emit('error', { code: 'SUBMIT_FAILED', message: err.message });
-    }
-  });
-
-  // Live-sync final answer typing
-  socket.on('final_answer_typing', ({ roomCode, partialAnswer } = {}) => {
-    socket.to(roomCode).emit('final_answer_update', { partialAnswer, by: socket.id });
-  });
-
-  // Submit Final Answer
-  socket.on('submit_final', async ({ roomCode, answer } = {}) => {
-    try {
-      const result = await gm.submitFinal(roomCode, socket.id, answer);
-      if (!result.correct) {
-        socket.emit('final_answer_result', { correct: false });
-        return;
-      }
-
-      io.to(roomCode).emit('round_complete', {
-        scores: result.scores,
-        gameOver: result.gameOver,
-        nextRound: result.nextRound,
-      });
-    } catch (err) {
-      socket.emit('error', { code: 'FINAL_FAILED', message: err.message });
-    }
-  });
-
-  // Advance to next round
-  socket.on('next_round', async ({ roomCode } = {}) => {
+  socket.on('place_tiles', async ({ roomCode, placements } = {}) => {
     try {
       const room = gm.getRoom(roomCode);
-      if (!room || room.hostId !== socket.id) return;
+      if (!room || room.status !== 'playing') return;
 
-      const { roundState, puzzleAssignments } = await gm.nextRound(roomCode);
+      const result = await wg.applyMove(room, socket.id, placements);
 
-      io.to(roomCode).emit('game_started', {
-        roundIndex: roundState.roundIndex,
-        theme: roundState.theme,
-        totalRounds: room.totalRounds,
+      if (!result.success) {
+        socket.emit('invalid_move', { reason: result.reason, invalidWords: result.invalidWords });
+        return;
+      }
+
+      // Broadcast updated board and scores
+      io.to(roomCode).emit('move_accepted', {
+        board: result.board,
+        scores: result.scores,
+        bagCount: result.bagCount,
+        currentTurnSocketId: result.currentTurnSocketId,
+        wordsFormed: result.wordsFormed,
+        moveScore: result.moveScore,
+        bySocketId: result.bySocketId,
       });
 
-      for (const [socketId, puzzle] of Object.entries(puzzleAssignments)) {
-        io.to(socketId).emit('puzzle_assigned', { puzzle: sanitizePuzzle(puzzle) });
+      // Send private new rack to the player who just moved
+      socket.emit('rack_updated', { rack: result.newRack });
+
+      if (result.gameOver) {
+        const finalScores = await wg.finalizeGame(room);
+        io.to(roomCode).emit('game_over', { reason: 'rack_empty', finalScores });
       }
     } catch (err) {
-      socket.emit('error', { code: 'NEXT_ROUND_FAILED', message: err.message });
+      socket.emit('error', { code: 'PLACE_FAILED', message: err.message });
     }
   });
 
-  // Request Hint
+  // ── Pass Turn ──────────────────────────────────────────────────────────────
+
+  socket.on('pass_turn', async ({ roomCode } = {}) => {
+    try {
+      const room = gm.getRoom(roomCode);
+      if (!room || room.status !== 'playing') return;
+
+      const result = await wg.applyPass(room, socket.id);
+      if (!result.success) { socket.emit('invalid_move', { reason: result.reason }); return; }
+
+      io.to(roomCode).emit('turn_passed', {
+        bySocketId: socket.id,
+        currentTurnSocketId: result.currentTurnSocketId,
+        consecutivePasses: result.consecutivePasses,
+      });
+
+      if (result.gameOver) {
+        const finalScores = await wg.finalizeGame(room);
+        io.to(roomCode).emit('game_over', { reason: 'all_passed', finalScores });
+      }
+    } catch (err) {
+      socket.emit('error', { code: 'PASS_FAILED', message: err.message });
+    }
+  });
+
+  // ── Exchange Tiles ─────────────────────────────────────────────────────────
+
+  socket.on('exchange_tiles', async ({ roomCode, letters } = {}) => {
+    try {
+      const room = gm.getRoom(roomCode);
+      if (!room || room.status !== 'playing') return;
+
+      const result = await wg.applyExchange(room, socket.id, letters);
+      if (!result.success) { socket.emit('invalid_move', { reason: result.reason }); return; }
+
+      io.to(roomCode).emit('tiles_exchanged', {
+        bySocketId: socket.id,
+        currentTurnSocketId: result.currentTurnSocketId,
+        bagCount: result.bagCount,
+      });
+
+      // Private new rack
+      socket.emit('rack_updated', { rack: result.newRack });
+    } catch (err) {
+      socket.emit('error', { code: 'EXCHANGE_FAILED', message: err.message });
+    }
+  });
+
+  // ── Request Hint ───────────────────────────────────────────────────────────
+
   socket.on('request_hint', ({ roomCode } = {}) => {
     try {
-      const result = gm.requestHint(roomCode, socket.id);
-      socket.emit('hint_sent', result);
+      const room = gm.getRoom(roomCode);
+      if (!room || !room.game) return;
+
+      const player = room.players[socket.id];
+      if (!player) return;
+
+      const hint = findHint(player.rack, room.game.board);
+      socket.emit('hint_result', hint ? { word: hint.word, placements: hint.placements } : { word: null, placements: [] });
     } catch (err) {
       socket.emit('error', { code: 'HINT_FAILED', message: err.message });
     }
   });
 
-  // Skip Player (host only)
-  socket.on('skip_player', async ({ roomCode, targetSocketId } = {}) => {
-    try {
-      const result = await gm.skipPlayer(roomCode, socket.id, targetSocketId);
-      if (!result) return;
+  // ── Rejoin ─────────────────────────────────────────────────────────────────
 
-      io.to(targetSocketId).emit('fragment_revealed', { fragment: result.fragment, skipped: true });
-      io.to(roomCode).emit('puzzle_solved', {
-        socketId: targetSocketId,
-        solvedCount: result.solvedCount,
-        totalPlayers: result.totalPlayers,
+  socket.on('rejoin_game', async ({ roomCode, playerName } = {}) => {
+    try {
+      const room = await gm.rejoinGame(socket.id, roomCode.toUpperCase(), playerName);
+      socket.join(room.roomCode);
+
+      const player = room.players[socket.id];
+      const game = room.game;
+
+      socket.emit('game_rejoined', {
+        roomCode: room.roomCode,
+        board: game ? game.board : {},
+        rack: player.rack,
+        scores: game ? wg.getScores(room) : [],
+        currentTurnSocketId: game ? game.turnOrder[game.currentTurnIndex] : null,
+        bagCount: game ? game.bag.length : 98,
+        players: gm.getPlayerList(room),
+        isHost: room.hostId === socket.id,
       });
 
-      if (result.allSolved) {
-        const room = gm.getRoom(roomCode);
-        const roundState = room.rounds[room.currentRound - 1] || room.rounds[room.currentRound];
-        io.to(roomCode).emit('final_puzzle_ready', {
-          prompt: roundState.fragmentSet.prompt,
-        });
-      }
+      socket.to(room.roomCode).emit('player_rejoined', {
+        socketId: socket.id,
+        name: player.name,
+      });
     } catch (err) {
-      socket.emit('error', { code: 'SKIP_FAILED', message: err.message });
+      socket.emit('error', { code: 'REJOIN_FAILED', message: err.message });
     }
   });
 
-  // Disconnect
+  // ── Disconnect ─────────────────────────────────────────────────────────────
+
   socket.on('disconnect', async () => {
     console.log(`[disconnect] ${socket.id}`);
     const result = await gm.handleDisconnect(socket.id);
@@ -202,13 +233,6 @@ io.on('connection', (socket) => {
   });
 });
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function sanitizePuzzle(puzzle) {
-  const { id, type, subject, prompt, options, hint, estimatedSeconds } = puzzle;
-  return { id, type, subject, prompt, options, hint, estimatedSeconds };
-}
-
 // ─── Start Server ─────────────────────────────────────────────────────────────
 
 function getLanIp() {
@@ -220,8 +244,7 @@ function getLanIp() {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => {
-  const lanIp = getLanIp();
-  console.log('\n  Family Escape Rooms is running!');
+  console.log('\n  Family Word Game is running!');
   console.log(`\n  Local:   http://localhost:${PORT}`);
-  console.log(`  Network: http://${lanIp}:${PORT}  ← open this on iPads\n`);
+  console.log(`  Network: http://${getLanIp()}:${PORT}  ← open this on iPads\n`);
 });

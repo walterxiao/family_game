@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useGame } from '../context/GameContext';
 import socket from '../socket';
 
-const THEME_ICONS = { space: '🚀', jungle: '🌿', ocean: '🌊', castle: '🏰' };
+const THEME_ICONS = { a: '🔤', b: '🌟', c: '⭐', d: '🏆' };
 const VERSION = 'v1.0.1';
 
 export default function LandingPage() {
@@ -14,7 +14,7 @@ export default function LandingPage() {
   const [selectedRoom, setSelectedRoom] = useState(null); // room object to join
   const [name, setName]       = useState('');
   const [age, setAge]         = useState('');
-  const [rounds, setRounds]   = useState('4');
+  // rounds removed — word game has no fixed round count
   const [loading, setLoading] = useState(false);
   const [err, setErr]         = useState('');
   const [rooms, setRooms]     = useState([]);
@@ -40,7 +40,7 @@ export default function LandingPage() {
     if (!name.trim() || !age) { setErr('Please enter your name and age.'); return; }
     setLoading(true);
     dispatch({ type: 'SET_IDENTITY', name: name.trim(), age: Number(age), isHost: true });
-    socket.emit('create_room', { name: name.trim(), age: Number(age), totalRounds: Number(rounds) });
+    socket.emit('create_room', { name: name.trim(), age: Number(age) });
     socket.once('room_created', () => { navigate('/lobby'); setLoading(false); });
     socket.once('error', ({ message }) => { setErr(message); setLoading(false); });
   }
@@ -80,9 +80,9 @@ export default function LandingPage() {
     <div className="page">
       {/* Header */}
       <div style={{ textAlign: 'center', marginBottom: 8 }}>
-        <div style={{ fontSize: '3.5rem', marginBottom: 8 }}>{Object.values(THEME_ICONS).join(' ')}</div>
-        <h1 className="title-gradient">Family Escape Rooms</h1>
-        <p className="mt-2">Solve puzzles together on your iPads!</p>
+        <div style={{ fontSize: '3.5rem', marginBottom: 8 }}>🔤 🌟 🏆</div>
+        <h1 className="title-gradient">Family Word Game</h1>
+        <p className="mt-2">Play words together on your iPads!</p>
         <p style={{ fontSize: '0.75rem', color: 'var(--muted)', marginTop: 4 }}>{VERSION}</p>
       </div>
 
@@ -115,7 +115,7 @@ export default function LandingPage() {
                         {room.hostName}'s Game
                       </div>
                       <div style={{ fontSize: '0.8rem', color: 'var(--muted)', marginTop: 2 }}>
-                        {room.playerCount} player{room.playerCount !== 1 ? 's' : ''} · {room.totalRounds} rounds
+                        {room.playerCount} player{room.playerCount !== 1 ? 's' : ''} waiting
                       </div>
                     </div>
                     <button
@@ -144,7 +144,7 @@ export default function LandingPage() {
           <div style={{ marginBottom: 20 }}>
             <h2>Join {selectedRoom.hostName}'s Game</h2>
             <p className="text-muted mt-2" style={{ fontSize: '0.9rem' }}>
-              {selectedRoom.playerCount} player{selectedRoom.playerCount !== 1 ? 's' : ''} waiting · {selectedRoom.totalRounds} rounds
+              {selectedRoom.playerCount} player{selectedRoom.playerCount !== 1 ? 's' : ''} waiting
             </p>
           </div>
           <form onSubmit={handleJoin}>
@@ -161,17 +161,12 @@ export default function LandingPage() {
         </div>
       )}
 
-      {/* ── Create: name + age + rounds ── */}
+      {/* ── Create: name + age ── */}
       {mode === 'create' && (
         <div className="card" style={{ width: '100%', maxWidth: 480 }}>
-          <h2 style={{ marginBottom: 20 }}>Create Game</h2>
+          <h2 style={{ marginBottom: 20 }}>Create Game 🔤</h2>
           <form onSubmit={handleCreate}>
             {identityFields}
-            <div className="field">
-              <label>Number of Rounds</label>
-              <input type="number" inputMode="numeric" value={rounds}
-                onChange={e => setRounds(e.target.value)} min="1" max="8" />
-            </div>
             {err && <p className="feedback-wrong mt-2">{err}</p>}
             <button className="btn btn-primary mt-4" type="submit" disabled={loading}>
               {loading ? 'Creating…' : 'Create Game'}

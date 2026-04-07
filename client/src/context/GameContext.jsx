@@ -11,57 +11,69 @@ const initialState = {
   myAge: null,
   isHost: false,
 
-  // Room
-  players: [],      // [{ socketId, name, age, tier, role, status, score }]
-  totalRounds: 4,
+  // Lobby
+  players: [],   // [{ socketId, name, age, role, status, score, turnPosition }]
 
-  // Game progress
-  gamePhase: 'landing',   // landing | lobby | puzzle | final | results | complete
-  roundIndex: 0,
-  theme: null,
+  // Game state
+  gamePhase: 'landing',          // landing | lobby | playing | gameover
+  board: {},                     // sparse: "row,col" → { letter, value, placedBy }
+  myRack: [],                    // ['A','B',...]
+  bagCount: 98,
+  currentTurnSocketId: null,
 
-  // Puzzle (my own)
-  myPuzzle: null,
-  myFragment: null,  // revealed after solving
-  solvedCount: 0,
+  // Client-side pending placements (not yet submitted)
+  pendingPlacements: [],         // [{ row, col, letter }]
+  selectedRackLetter: null,      // uppercase letter selected in rack (null = none)
 
-  // Final puzzle
-  finalPrompt: null,
-  finalAnswer: '',   // live-synced typing
-  finalResult: null, // true | false | null
+  // Feedback
+  lastMoveResult: null,          // { wordsFormed, moveScore, bySocketId, byName }
+  invalidMoveMsg: null,          // string | null
 
   // Hint
-  hint: null,
-  hintsRemaining: 3,
+  hintPlacements: null,          // [{ row, col, letter }] | null
 
-  // Scores (end of round)
-  scores: [],
+  // End game
+  finalScores: null,
+  gameOverReason: null,
 
-  // Error
   error: null,
 };
 
 function reducer(state, action) {
   switch (action.type) {
+
+    // ── Identity & Lobby ─────────────────────────────────────────────────────
+    case 'SET_IDENTITY':
+      return { ...state, myName: action.name, myAge: action.age, isHost: action.isHost };
+
     case 'ROOM_CREATED':
+      return {
+        ...state,
+        roomCode: action.roomCode,
+        mySocketId: socket.id,
+        players: action.players,
+        isHost: true,
+        gamePhase: 'lobby',
+        error: null,
+      };
+
     case 'ROOM_JOINED':
       return {
         ...state,
         roomCode: action.roomCode,
         mySocketId: socket.id,
         players: action.players,
-        totalRounds: action.totalRounds,
         isHost: action.isHost ?? state.isHost,
         gamePhase: 'lobby',
         error: null,
       };
-    case 'SET_IDENTITY':
-      return { ...state, myName: action.name, myAge: action.age, isHost: action.isHost };
+
     case 'PLAYER_JOINED':
       return {
         ...state,
         players: [...state.players.filter(p => p.socketId !== action.player.socketId), action.player],
       };
+
     case 'PLAYER_LEFT':
       return {
         ...state,
@@ -69,60 +81,158 @@ function reducer(state, action) {
           p.socketId === action.socketId ? { ...p, status: 'disconnected' } : p
         ),
       };
+
+    case 'PLAYER_REJOINED':
+      return {
+        ...state,
+        players: state.players.map(p =>
+          p.socketId === action.socketId ? { ...p, status: 'active' } : p
+        ),
+      };
+
+    // ── Game Start ───────────────────────────────────────────────────────────
     case 'GAME_STARTED':
       return {
         ...state,
-        gamePhase: 'puzzle',
-        roundIndex: action.roundIndex,
-        theme: action.theme,
-        totalRounds: action.totalRounds,
-        myPuzzle: null,
-        myFragment: null,
-        solvedCount: 0,
-        finalPrompt: null,
-        finalAnswer: '',
-        finalResult: null,
-        hint: null,
-        players: state.players.map(p => ({ ...p, status: 'solving' })),
+        gamePhase: 'playing',
+        board: action.board || {},
+        players: action.players || state.players,
+        bagCount: action.bagCount ?? 98,
+        currentTurnSocketId: action.currentTurnSocketId,
+        myRack: [],
+        pendingPlacements: [],
+        selectedRackLetter: null,
+        lastMoveResult: null,
+        invalidMoveMsg: null,
+        hintPlacements: null,
       };
-    case 'PUZZLE_ASSIGNED':
-      return { ...state, myPuzzle: action.puzzle };
-    case 'ANSWER_CORRECT':
-      return { ...state };
-    case 'FRAGMENT_REVEALED':
-      return { ...state, myFragment: action.fragment };
-    case 'PUZZLE_SOLVED':
+
+    case 'RACK_DEALT':
+      return { ...state, myRack: action.rack };
+
+    // ── Move Accepted (broadcast) ────────────────────────────────────────────
+    case 'MOVE_ACCEPTED': {
+      const byName = state.players.find(p => p.socketId === action.bySocketId)?.name || 'Someone';
       return {
         ...state,
-        solvedCount: action.solvedCount,
-        players: state.players.map(p =>
-          p.socketId === action.socketId ? { ...p, status: 'solved' } : p
-        ),
+        board: action.board,
+        players: state.players.map(p => {
+          const s = action.scores.find(sc => sc.socketId === p.socketId);
+          return s ? { ...p, score: s.score } : p;
+        }),
+        bagCount: action.bagCount,
+        currentTurnSocketId: action.currentTurnSocketId,
+        pendingPlacements: [],
+        selectedRackLetter: null,
+        hintPlacements: null,
+        invalidMoveMsg: null,
+        lastMoveResult: {
+          wordsFormed: action.wordsFormed,
+          moveScore: action.moveScore,
+          bySocketId: action.bySocketId,
+          byName,
+        },
       };
-    case 'FINAL_PUZZLE_READY':
-      return { ...state, gamePhase: 'final', finalPrompt: action.prompt };
-    case 'FINAL_ANSWER_UPDATE':
-      return { ...state, finalAnswer: action.partialAnswer };
-    case 'FINAL_CORRECT':
-      return { ...state, finalResult: true };
-    case 'FINAL_WRONG':
-      return { ...state, finalResult: false };
-    case 'ROUND_COMPLETE':
+    }
+
+    // ── My rack after my move ────────────────────────────────────────────────
+    case 'RACK_UPDATED':
+      return { ...state, myRack: action.rack };
+
+    // ── Invalid move ─────────────────────────────────────────────────────────
+    case 'INVALID_MOVE':
       return {
         ...state,
-        gamePhase: 'results',
-        scores: action.scores,
+        invalidMoveMsg: action.reason,
+        pendingPlacements: [],
+        selectedRackLetter: null,
       };
-    case 'GAME_COMPLETE':
-      return { ...state, gamePhase: 'complete', scores: action.scores };
-    case 'HINT_RECEIVED':
-      return { ...state, hint: action.hint, hintsRemaining: action.hintsRemaining ?? state.hintsRemaining };
+
+    // ── Pass / Exchange ──────────────────────────────────────────────────────
+    case 'TURN_PASSED':
+    case 'TILES_EXCHANGED':
+      return {
+        ...state,
+        currentTurnSocketId: action.currentTurnSocketId,
+        pendingPlacements: [],
+        selectedRackLetter: null,
+        invalidMoveMsg: null,
+        lastMoveResult: null,
+        hintPlacements: null,
+      };
+
+    // ── Hint ─────────────────────────────────────────────────────────────────
+    case 'HINT_RESULT':
+      return { ...state, hintPlacements: action.placements?.length ? action.placements : null };
+
+    // ── Game Over ────────────────────────────────────────────────────────────
+    case 'GAME_OVER':
+      return {
+        ...state,
+        gamePhase: 'gameover',
+        finalScores: action.finalScores,
+        gameOverReason: action.reason,
+      };
+
+    // ── Rejoin ───────────────────────────────────────────────────────────────
+    case 'GAME_REJOINED':
+      return {
+        ...state,
+        roomCode: action.roomCode,
+        mySocketId: socket.id,
+        isHost: action.isHost,
+        players: action.players,
+        board: action.board || {},
+        myRack: action.rack || [],
+        bagCount: action.bagCount ?? 98,
+        currentTurnSocketId: action.currentTurnSocketId,
+        gamePhase: action.currentTurnSocketId ? 'playing' : 'lobby',
+        pendingPlacements: [],
+        selectedRackLetter: null,
+        hintPlacements: null,
+        invalidMoveMsg: null,
+        lastMoveResult: null,
+      };
+
+    // ── Client-side tile interaction ─────────────────────────────────────────
+    case 'SELECT_RACK_LETTER':
+      return {
+        ...state,
+        selectedRackLetter: action.letter,
+        invalidMoveMsg: null,
+      };
+
+    case 'PLACE_TILE':
+      return {
+        ...state,
+        pendingPlacements: [...state.pendingPlacements, { row: action.row, col: action.col, letter: action.letter }],
+        selectedRackLetter: null,
+      };
+
+    case 'RECALL_TILE': {
+      // Remove the pending tile at this position (tap on a placed-pending tile)
+      const updated = state.pendingPlacements.filter(
+        p => !(p.row === action.row && p.col === action.col)
+      );
+      return { ...state, pendingPlacements: updated };
+    }
+
+    case 'RECALL_ALL':
+      return { ...state, pendingPlacements: [], selectedRackLetter: null };
+
+    case 'CLEAR_FEEDBACK':
+      return { ...state, lastMoveResult: null, invalidMoveMsg: null };
+
+    case 'CLEAR_HINT':
+      return { ...state, hintPlacements: null };
+
+    // ── Errors ───────────────────────────────────────────────────────────────
     case 'ERROR':
       return { ...state, error: action.message };
+
     case 'CLEAR_ERROR':
       return { ...state, error: null };
-    case 'SET_FINAL_ANSWER':
-      return { ...state, finalAnswer: action.value };
+
     default:
       return state;
   }
@@ -132,24 +242,26 @@ export function GameProvider({ children }) {
   const [state, dispatch] = useReducer(reducer, initialState);
 
   const setupListeners = useCallback(() => {
-    socket.on('room_created', (data) => dispatch({ type: 'ROOM_CREATED', ...data, isHost: true }));
-    socket.on('room_joined',  (data) => dispatch({ type: 'ROOM_JOINED', ...data }));
+    socket.on('room_created',  (data) => dispatch({ type: 'ROOM_CREATED', ...data }));
+    socket.on('room_joined',   (data) => dispatch({ type: 'ROOM_JOINED',  ...data }));
     socket.on('player_joined', ({ player }) => dispatch({ type: 'PLAYER_JOINED', player }));
-    socket.on('player_left',  ({ socketId }) => dispatch({ type: 'PLAYER_LEFT', socketId }));
-    socket.on('game_started', (data) => dispatch({ type: 'GAME_STARTED', ...data }));
-    socket.on('puzzle_assigned', ({ puzzle }) => dispatch({ type: 'PUZZLE_ASSIGNED', puzzle }));
-    socket.on('answer_result', ({ correct }) => { if (correct) dispatch({ type: 'ANSWER_CORRECT' }); });
-    socket.on('fragment_revealed', ({ fragment }) => dispatch({ type: 'FRAGMENT_REVEALED', fragment }));
-    socket.on('puzzle_solved', (data) => dispatch({ type: 'PUZZLE_SOLVED', ...data }));
-    socket.on('final_puzzle_ready', ({ prompt }) => dispatch({ type: 'FINAL_PUZZLE_READY', prompt }));
-    socket.on('final_answer_update', ({ partialAnswer }) => dispatch({ type: 'FINAL_ANSWER_UPDATE', partialAnswer }));
-    socket.on('final_answer_result', ({ correct }) =>
-      dispatch({ type: correct ? 'FINAL_CORRECT' : 'FINAL_WRONG' })
-    );
-    socket.on('round_complete', ({ scores, gameOver }) =>
-      dispatch({ type: gameOver ? 'GAME_COMPLETE' : 'ROUND_COMPLETE', scores })
-    );
-    socket.on('hint_sent', ({ hint, hintsRemaining }) => dispatch({ type: 'HINT_RECEIVED', hint, hintsRemaining }));
+    socket.on('player_left',   ({ socketId }) => dispatch({ type: 'PLAYER_LEFT', socketId }));
+    socket.on('player_rejoined', (d) => dispatch({ type: 'PLAYER_REJOINED', ...d }));
+
+    socket.on('game_started',  (data) => dispatch({ type: 'GAME_STARTED',  ...data }));
+    socket.on('rack_dealt',    ({ rack }) => dispatch({ type: 'RACK_DEALT', rack }));
+
+    socket.on('move_accepted', (data) => dispatch({ type: 'MOVE_ACCEPTED', ...data }));
+    socket.on('rack_updated',  ({ rack }) => dispatch({ type: 'RACK_UPDATED', rack }));
+    socket.on('invalid_move',  (data) => dispatch({ type: 'INVALID_MOVE', ...data }));
+
+    socket.on('turn_passed',   (data) => dispatch({ type: 'TURN_PASSED',    ...data }));
+    socket.on('tiles_exchanged', (data) => dispatch({ type: 'TILES_EXCHANGED', ...data }));
+
+    socket.on('hint_result',   (data) => dispatch({ type: 'HINT_RESULT', ...data }));
+    socket.on('game_over',     (data) => dispatch({ type: 'GAME_OVER',   ...data }));
+    socket.on('game_rejoined', (data) => dispatch({ type: 'GAME_REJOINED', ...data }));
+
     socket.on('error', ({ message }) => dispatch({ type: 'ERROR', message }));
   }, []);
 

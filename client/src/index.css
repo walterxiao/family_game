@@ -283,3 +283,34 @@ label {
   background: rgba(255,255,255,0.08);
   margin: 20px 0;
 }
+
+/* ── Word Game Tile Variables ── */
+:root {
+  --tile-bg: #d4a843;
+  --tile-text: #1a1205;
+}
+
+/* ── Feedback Banners ── */
+.feedback-banner {
+  padding: 8px 16px;
+  text-align: center;
+  font-weight: 700;
+  font-size: 0.95rem;
+  flex-shrink: 0;
+  border-radius: 0;
+}
+.feedback-correct {
+  background: rgba(76, 175, 80, 0.18);
+  color: #81c784;
+  border-top: 1px solid rgba(76,175,80,0.3);
+  border-bottom: 1px solid rgba(76,175,80,0.3);
+}
+.feedback-wrong {
+  background: rgba(233, 69, 96, 0.18);
+  color: #ef9a9a;
+  border-top: 1px solid rgba(233,69,96,0.3);
+  border-bottom: 1px solid rgba(233,69,96,0.3);
+}
+
+/* Prevent iOS double-tap zoom on the board */
+* { touch-action: manipulation; }

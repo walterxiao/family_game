@@ -1,137 +1,242 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useCallback, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useGame } from '../context/GameContext';
-import PuzzleRouter from '../components/puzzles/PuzzleRouter';
-import ClueFragment from '../components/clue/ClueFragment';
 import socket from '../socket';
-
-const THEME_META = {
-  space:  { icon: '🚀', label: 'Space Station', bg: '#0d1b2a' },
-  jungle: { icon: '🌿', label: 'Jungle Temple', bg: '#0d1f0d' },
-  ocean:  { icon: '🌊', label: 'Deep Ocean',    bg: '#0d1a2a' },
-  castle: { icon: '🏰', label: 'Ancient Castle', bg: '#1a0d1f' },
-};
+import Board from '../components/game/Board';
+import TileRack from '../components/game/TileRack';
+import ActionBar from '../components/game/ActionBar';
+import ScorePanel from '../components/game/ScorePanel';
+import TurnBanner from '../components/game/TurnBanner';
+import HintBanner from '../components/game/HintBanner';
+import WordValidationFeedback from '../components/game/WordValidationFeedback';
 
 export default function GamePage() {
-  const { state } = useGame();
+  const { state, dispatch } = useGame();
   const navigate = useNavigate();
-  const { roomCode, theme, roundIndex, totalRounds, myPuzzle, myFragment, solvedCount, players, isHost, hint } = state;
+  const [showExchange, setShowExchange] = useState(false);
+  const [exchangeSelected, setExchangeSelected] = useState([]);
+  const [hintWord, setHintWord] = useState(null);
 
-  const [feedback, setFeedback] = useState(null); // 'correct' | 'wrong'
-  const [showHint, setShowHint] = useState(false);
+  const {
+    roomCode, mySocketId, players,
+    board, myRack, bagCount, currentTurnSocketId,
+    pendingPlacements, selectedRackLetter,
+    lastMoveResult, invalidMoveMsg, hintPlacements,
+    gamePhase,
+  } = state;
 
-  const meta = THEME_META[theme] || THEME_META.space;
-  const totalPlayers = players.length;
-  const mySolved = !!myFragment;
+  const isMyTurn = currentTurnSocketId === mySocketId;
+  const currentPlayer = players.find(p => p.socketId === currentTurnSocketId);
 
   useEffect(() => {
-    if (!roomCode) { navigate('/'); return; }
-
-    socket.on('final_puzzle_ready', () => navigate('/final'));
-    return () => { socket.off('final_puzzle_ready'); };
+    if (!roomCode) navigate('/');
   }, [roomCode, navigate]);
 
-  function handleAnswer(answer) {
-    socket.emit('submit_answer', { roomCode, answer });
+  useEffect(() => {
+    if (gamePhase === 'gameover') navigate('/end');
+  }, [gamePhase, navigate]);
 
-    socket.once('answer_result', ({ correct }) => {
-      setFeedback(correct ? 'correct' : 'wrong');
-      if (!correct) setTimeout(() => setFeedback(null), 1200);
+  // Track hint word separately (cleared when hint placements clear)
+  useEffect(() => {
+    if (!hintPlacements) setHintWord(null);
+  }, [hintPlacements]);
+
+  // Listen for hint results (to capture word name)
+  useEffect(() => {
+    function onHintResult({ word }) {
+      if (word) setHintWord(word);
+    }
+    socket.on('hint_result', onHintResult);
+    return () => socket.off('hint_result', onHintResult);
+  }, []);
+
+  // ── Tile placement ────────────────────────────────────────────────────────
+
+  function handleRackSelect(letter) {
+    if (!isMyTurn) return;
+    dispatch({ type: 'SELECT_RACK_LETTER', letter: selectedRackLetter === letter ? null : letter });
+  }
+
+  function handleCellClick(row, col) {
+    if (!isMyTurn || !selectedRackLetter) return;
+    if (board[`${row},${col}`]) return;
+    if (pendingPlacements.some(p => p.row === row && p.col === col)) return;
+    dispatch({ type: 'PLACE_TILE', row, col, letter: selectedRackLetter });
+  }
+
+  function handleRecallTile(row, col) {
+    dispatch({ type: 'RECALL_TILE', row, col });
+  }
+
+  // ── Actions ───────────────────────────────────────────────────────────────
+
+  function handlePlay() {
+    if (pendingPlacements.length === 0) return;
+    socket.emit('place_tiles', { roomCode, placements: pendingPlacements });
+    dispatch({ type: 'RECALL_ALL' });
+  }
+
+  function handleRecallAll() {
+    dispatch({ type: 'RECALL_ALL' });
+  }
+
+  function handlePass() {
+    socket.emit('pass_turn', { roomCode });
+  }
+
+  function handleRequestHint() {
+    socket.emit('request_hint', { roomCode });
+  }
+
+  function handleClearHint() {
+    dispatch({ type: 'CLEAR_HINT' });
+    setHintWord(null);
+  }
+
+  function handleClearFeedback() {
+    dispatch({ type: 'CLEAR_FEEDBACK' });
+  }
+
+  // ── Exchange ──────────────────────────────────────────────────────────────
+
+  function handleExchangeOpen() {
+    setExchangeSelected([]);
+    setShowExchange(true);
+  }
+
+  function handleExchangeSubmit() {
+    if (exchangeSelected.length === 0) return;
+    const letters = exchangeSelected.map(k => k.split('_')[0]);
+    socket.emit('exchange_tiles', { roomCode, letters });
+    setShowExchange(false);
+    setExchangeSelected([]);
+  }
+
+  function toggleExchangeLetter(letter, idx) {
+    setExchangeSelected(prev => {
+      const key = `${letter}_${idx}`;
+      return prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key];
     });
   }
 
-  function handleHint() {
-    socket.emit('request_hint', { roomCode });
-    setShowHint(true);
-  }
+  // ─────────────────────────────────────────────────────────────────────────
 
-  function skipPlayer(targetId) {
-    socket.emit('skip_player', { roomCode, targetSocketId: targetId });
-  }
+  if (!roomCode) return null;
 
-  if (!roomCode || !myPuzzle) {
+  // Exchange modal
+  if (showExchange) {
+    const exKeys = new Set(exchangeSelected);
     return (
-      <div className="page">
-        <div className="card text-center">
-          <p>Loading puzzle…</p>
+      <div className="page" style={{ gap: 16 }}>
+        <div className="card" style={{ maxWidth: 400, width: '100%' }}>
+          <h2 style={{ marginBottom: 8 }}>🔄 Exchange Tiles</h2>
+          <p className="text-muted" style={{ marginBottom: 20, fontSize: '0.9rem' }}>
+            Tap tiles to select, then hit Exchange. Your turn passes.
+          </p>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center', marginBottom: 20 }}>
+            {myRack.map((letter, idx) => {
+              const key = `${letter}_${idx}`;
+              const sel = exKeys.has(key);
+              return (
+                <div key={key} onClick={() => toggleExchangeLetter(letter, idx)}
+                  style={{
+                    width: 52, height: 52, borderRadius: 8, display: 'flex',
+                    flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+                    background: sel ? 'var(--accent)' : 'var(--tile-bg)',
+                    color: sel ? '#fff' : 'var(--tile-text)',
+                    fontWeight: 800, fontSize: 22, cursor: 'pointer',
+                    border: sel ? '2px solid #fff' : '2px solid rgba(255,255,255,0.15)',
+                    userSelect: 'none',
+                  }}>
+                  {letter}
+                </div>
+              );
+            })}
+          </div>
+          <button className="btn btn-primary" disabled={exchangeSelected.length === 0} onClick={handleExchangeSubmit}>
+            Exchange {exchangeSelected.length} tile{exchangeSelected.length !== 1 ? 's' : ''}
+          </button>
+          <button className="btn btn-ghost mt-2" onClick={() => setShowExchange(false)}>Cancel</button>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="page" style={{ background: meta.bg, minHeight: '100vh' }}>
-      {/* Header */}
-      <div style={{ width: '100%', maxWidth: 480 }}>
-        <div className="flex justify-between items-center" style={{ marginBottom: 12 }}>
-          <span className="theme-badge">{meta.icon} {meta.label}</span>
-          <span className="text-muted" style={{ fontSize: '0.9rem' }}>
-            Round {roundIndex + 1} / {totalRounds}
-          </span>
-        </div>
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      height: '100vh',
+      width: '100%',
+      overflow: 'hidden',
+      background: 'var(--bg)',
+    }}>
+      {/* Score strip */}
+      <ScorePanel
+        players={players}
+        currentTurnSocketId={currentTurnSocketId}
+        mySocketId={mySocketId}
+        bagCount={bagCount}
+      />
 
-        {/* Progress bar */}
-        <div style={{ marginBottom: 4 }}>
-          <div className="flex justify-between" style={{ fontSize: '0.8rem', color: 'var(--muted)', marginBottom: 4 }}>
-            <span>{solvedCount} / {totalPlayers} solved their puzzle</span>
-          </div>
-          <div className="progress-bar-wrap">
-            <div className="progress-bar-fill" style={{ width: `${(solvedCount / totalPlayers) * 100}%` }} />
-          </div>
-        </div>
+      {/* Turn banner */}
+      <TurnBanner isMyTurn={isMyTurn} currentName={currentPlayer?.name} />
+
+      {/* Feedback */}
+      <WordValidationFeedback
+        lastMoveResult={lastMoveResult}
+        invalidMoveMsg={invalidMoveMsg}
+        mySocketId={mySocketId}
+        onClear={handleClearFeedback}
+      />
+
+      {/* Hint banner */}
+      {hintWord && (
+        <HintBanner word={hintWord} onClear={handleClearHint} />
+      )}
+
+      {/* Board — scrollable area */}
+      <div style={{
+        flex: 1,
+        overflowY: 'auto',
+        overflowX: 'hidden',
+        display: 'flex',
+        alignItems: 'flex-start',
+        justifyContent: 'center',
+        padding: '8px 4px',
+        WebkitOverflowScrolling: 'touch',
+      }}>
+        <Board
+          board={board}
+          pendingPlacements={pendingPlacements}
+          hintPlacements={hintPlacements}
+          selectedLetter={selectedRackLetter}
+          isMyTurn={isMyTurn}
+          onCellClick={handleCellClick}
+          onRecallTile={handleRecallTile}
+        />
       </div>
 
-      {/* Puzzle or Fragment reveal */}
-      {mySolved ? (
-        <ClueFragment fragment={myFragment} solvedCount={solvedCount} totalPlayers={totalPlayers} />
-      ) : (
-        <div className="card" style={{ width: '100%', maxWidth: 480 }}>
-          <PuzzleRouter
-            puzzle={myPuzzle}
-            onSubmit={handleAnswer}
-            feedback={feedback}
-            disabled={mySolved}
-          />
+      {/* Action bar */}
+      <ActionBar
+        isMyTurn={isMyTurn}
+        hasPending={pendingPlacements.length > 0}
+        canExchange={bagCount >= 7}
+        onPlay={handlePlay}
+        onRecallAll={handleRecallAll}
+        onPass={handlePass}
+        onExchange={handleExchangeOpen}
+        onHint={handleRequestHint}
+      />
 
-          {feedback === 'wrong' && (
-            <p className="feedback-wrong mt-2 text-center">Not quite — try again!</p>
-          )}
-
-          {showHint && hint && (
-            <div className="hint-box mt-4">💡 {hint}</div>
-          )}
-
-          {!showHint && (
-            <button className="btn btn-ghost mt-4" onClick={handleHint} style={{ fontSize: '0.9rem' }}>
-              💡 Need a hint?
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* Host controls */}
-      {isHost && (
-        <div className="card" style={{ width: '100%', maxWidth: 480 }}>
-          <h3 style={{ marginBottom: 12 }}>Host Controls</h3>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {players.filter(p => p.status === 'solving').map(p => (
-              <div key={p.socketId} className="flex justify-between items-center">
-                <span>{p.name} is still solving…</span>
-                <button
-                  className="btn btn-ghost"
-                  style={{ width: 'auto', padding: '8px 14px', fontSize: '0.85rem' }}
-                  onClick={() => skipPlayer(p.socketId)}
-                >
-                  Skip
-                </button>
-              </div>
-            ))}
-            {players.every(p => p.status !== 'solving') && (
-              <p className="text-muted" style={{ fontSize: '0.9rem' }}>All players are done!</p>
-            )}
-          </div>
-        </div>
-      )}
+      {/* Tile rack */}
+      <TileRack
+        rack={myRack}
+        pendingPlacements={pendingPlacements}
+        selectedLetter={selectedRackLetter}
+        onSelect={handleRackSelect}
+        isMyTurn={isMyTurn}
+      />
     </div>
   );
 }
